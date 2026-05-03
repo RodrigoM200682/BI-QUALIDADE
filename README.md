@@ -1,40 +1,38 @@
-# BI Qualidade Integrado
+# BI Qualidade Corporativo
 
-Aplicativo Streamlit único com três módulos preservados:
+Aplicativo Streamlit integrado com três módulos: Indicadores de Qualidade, SQDCP/FMDS e Projeto CPK.
 
-1. Indicadores de Qualidade
-2. SQDCP / FMDS
-3. Projeto CPK
+## Primeiro acesso
 
-## Arquivos principais
+- Usuário: `admin`
+- Senha: `QualidadeRS2026`
 
-- `app.py`: tela inicial integrada e roteamento dos módulos.
-- `modulos/indicadores_qualidade.py`: módulo de indicadores.
-- `modulos/sqdcp.py`: módulo SQDCP/FMDS.
-- `modulos/cpk.py`: módulo CPK.
-- `Manual_BI_Qualidade_Integrado_RM_2026.pdf`: manual disponível para download na tela inicial.
-- `requirements.txt`: dependências para Streamlit Cloud.
+Após o primeiro acesso, crie usuários nominais em **Administração > Usuários**.
 
-## Ajustes desta versão
+## Como rodar localmente
 
-- Visual padronizado em todas as telas.
-- Botão verde de retorno para a tela inicial ao lado do título do módulo.
-- Persistência por módulo em `.unified_state`.
-- Mantida a persistência própria já existente dos módulos:
-  - Indicadores: última base Excel carregada.
-  - SQDCP: base Excel local e opção GitHub via secrets.
-  - CPK: estado das cartas, características e medições.
-- Manual integrado na tela inicial com download em PDF.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
 ## Como publicar no Streamlit Cloud
 
-1. Envie todos os arquivos e pastas para o GitHub.
-2. Configure o arquivo principal como `app.py`.
-3. Mantenha a pasta `modulos` no repositório.
-4. Mantenha o `requirements.txt` na raiz.
-5. Para persistência definitiva do SQDCP, configure os secrets:
-   - `GITHUB_TOKEN`
-   - `GITHUB_REPO`
-   - `GITHUB_BRANCH`
-   - `GITHUB_FILE_PATH`
+1. Suba todos os arquivos deste pacote no GitHub.
+2. Configure o app apontando para `app.py`.
+3. Opcional: configure os Secrets do GitHub para o módulo SQDCP usando `.streamlit/secrets.toml.example` como referência.
 
+## Persistência
+
+- Banco corporativo: `data/corporativo/bi_qualidade_corporativo.db`
+- Indicadores de Qualidade: `data/qualidade/`
+- SQDCP/FMDS: `data/sqdcp/`
+- Projeto CPK: `data/cpk/`
+- Backups: `data/backups/`
+
+## Perfis
+
+- `admin`: acessa tudo, usuários, auditoria e backup.
+- `qualidade`: acessa Indicadores de Qualidade e Projeto CPK.
+- `producao`: acessa SQDCP/FMDS.
+- `consulta`: acessa os módulos sem administração.
