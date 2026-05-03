@@ -1,40 +1,45 @@
-# BI Qualidade Integrado
+# BI Qualidade Corporativo - Versão estruturada para GitHub/Streamlit Cloud
 
-Aplicativo Streamlit único com três módulos preservados:
+## Como rodar
 
-1. Indicadores de Qualidade
-2. SQDCP / FMDS
-3. Projeto CPK
+1. Suba todos os arquivos e pastas deste pacote para o repositório GitHub.
+2. No Streamlit Cloud, configure o arquivo principal como `app.py`.
+3. O aplicativo cria automaticamente as pastas de persistência caso o GitHub não envie pastas vazias.
 
-## Arquivos principais
+## Primeiro acesso
 
-- `app.py`: tela inicial integrada e roteamento dos módulos.
-- `modulos/indicadores_qualidade.py`: módulo de indicadores.
-- `modulos/sqdcp.py`: módulo SQDCP/FMDS.
-- `modulos/cpk.py`: módulo CPK.
-- `Manual_BI_Qualidade_Integrado_RM_2026.pdf`: manual disponível para download na tela inicial.
-- `requirements.txt`: dependências para Streamlit Cloud.
+- Usuário: `admin`
+- Senha: `QualidadeRS2026`
 
-## Ajustes desta versão
+## Estrutura obrigatória
 
-- Visual padronizado em todas as telas.
-- Botão verde de retorno para a tela inicial ao lado do título do módulo.
-- Persistência por módulo em `.unified_state`.
-- Mantida a persistência própria já existente dos módulos:
-  - Indicadores: última base Excel carregada.
-  - SQDCP: base Excel local e opção GitHub via secrets.
-  - CPK: estado das cartas, características e medições.
-- Manual integrado na tela inicial com download em PDF.
+```
+app.py
+corporate_core.py
+requirements.txt
+modulos/
+  __init__.py
+  indicadores_qualidade.py
+  sqdcp.py
+  cpk.py
+data/
+  corporativo/.gitkeep
+  qualidade/.gitkeep
+  sqdcp/.gitkeep
+  cpk/.gitkeep
+  backups/.gitkeep
+manual/
+  Manual_BI_Qualidade_Corporativo_RM_2026.pdf
+```
 
-## Como publicar no Streamlit Cloud
+## Correção aplicada
 
-1. Envie todos os arquivos e pastas para o GitHub.
-2. Configure o arquivo principal como `app.py`.
-3. Mantenha a pasta `modulos` no repositório.
-4. Mantenha o `requirements.txt` na raiz.
-5. Para persistência definitiva do SQDCP, configure os secrets:
-   - `GITHUB_TOKEN`
-   - `GITHUB_REPO`
-   - `GITHUB_BRANCH`
-   - `GITHUB_FILE_PATH`
+Esta versão possui mecanismo de autocorreção: se a pasta `modulos` ou algum módulo não estiver no servidor, o `app.py` recria os arquivos essenciais automaticamente a partir de cópias internas.
 
+## Persistência
+
+- Banco corporativo: `data/corporativo/bi_qualidade_corporativo.db`
+- Indicadores: `data/qualidade/`
+- SQDCP: `data/sqdcp/`
+- CPK: `data/cpk/`
+- Backups: `data/backups/`
