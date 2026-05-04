@@ -12,6 +12,13 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+try:
+    from corporate_core import read_setting, write_setting, audit
+except Exception:
+    read_setting = None
+    write_setting = None
+    audit = None
+
 st.set_page_config(page_title="FMDS SQDCP", page_icon="📊", layout="wide")
 
 st.markdown("""
@@ -35,7 +42,7 @@ section[data-testid="stSidebar"] > div {
 # Configuração de persistência
 # =====================================================
 LOCAL_DATA_DIR = Path("data/sqdcp")
-LOCAL_DATA_DIR.mkdir(exist_ok=True)
+LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOCAL_DB_FILE = LOCAL_DATA_DIR / "sqdcp_base.xlsx"
 
 DATA_SHEET = "dados"
@@ -97,7 +104,7 @@ def get_secret(name: str, default: str = "") -> str:
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN")
 GITHUB_REPO = get_secret("GITHUB_REPO")  # exemplo: usuario/repositorio
 GITHUB_BRANCH = get_secret("GITHUB_BRANCH", "main")
-GITHUB_FILE_PATH = get_secret("GITHUB_FILE_PATH", "data/sqdcp/sqdcp_base.xlsx")
+GITHUB_FILE_PATH = get_secret("GITHUB_SQDCP_FILE_PATH", get_secret("GITHUB_FILE_PATH", "data/sqdcp/sqdcp_base.xlsx"))
 
 
 def github_enabled() -> bool:
@@ -114,6 +121,37 @@ def github_headers() -> dict:
 
 def github_api_url() -> str:
     return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+
+
+def read_corporate_store_file() -> Optional[bytes]:
+    """Recupera a base SQDCP salva no banco corporativo local.
+
+    Esta camada é usada como redundância ao arquivo Excel local e ao GitHub.
+    O conteúdo é armazenado em base64 para preservar o arquivo .xlsx completo,
+    incluindo as abas dados, acoes e metas.
+    """
+    if read_setting is None:
+        return None
+    try:
+        payload = read_setting("sqdcp_base_xlsx_b64", None)
+        if not payload:
+            return None
+        return base64.b64decode(payload.encode("utf-8"))
+    except Exception:
+        return None
+
+
+def write_corporate_store_file(file_bytes: bytes) -> None:
+    """Salva a base SQDCP no banco corporativo como backup persistente."""
+    if write_setting is None:
+        return
+    try:
+        payload = base64.b64encode(file_bytes).decode("utf-8")
+        write_setting("sqdcp_base_xlsx_b64", payload)
+        if audit:
+            audit(None, "sqdcp", "save_persistent_base", "Base SQDCP salva no armazenamento corporativo.")
+    except Exception:
+        pass
 
 
 def read_github_file() -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
@@ -268,13 +306,33 @@ def load_base() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
             return dados, acoes, metas, avisos
         except Exception as exc:
             avisos.append(f"A base local não pôde ser lida: {exc}")
-    return empty_dados(), empty_acoes(), empty_metas(), avisos
+
+    stored_bytes = read_corporate_store_file()
+    if stored_bytes:
+        try:
+            LOCAL_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+            LOCAL_DB_FILE.write_bytes(stored_bytes)
+            dados, acoes, metas = read_workbook(stored_bytes)
+            avisos.append("Base SQDCP recuperada do armazenamento corporativo.")
+            return dados, acoes, metas, avisos
+        except Exception as exc:
+            avisos.append(f"A base SQDCP persistida não pôde ser lida: {exc}")
+
+    # Cria uma base inicial real, para que a pasta data/sqdcp não dependa de arquivos ocultos.
+    dados, acoes, metas = empty_dados(), empty_acoes(), empty_metas()
+    try:
+        LOCAL_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOCAL_DB_FILE.write_bytes(to_workbook_bytes(dados, acoes, metas))
+    except Exception:
+        pass
+    return dados, acoes, metas, avisos
 
 
 def save_base(dados: pd.DataFrame, acoes: pd.DataFrame, metas: Optional[pd.DataFrame] = None) -> Optional[str]:
     file_bytes = to_workbook_bytes(dados, acoes, metas)
-    LOCAL_DB_FILE.parent.mkdir(exist_ok=True)
+    LOCAL_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCAL_DB_FILE.write_bytes(file_bytes)
+    write_corporate_store_file(file_bytes)
     return write_github_file(file_bytes)
 
 

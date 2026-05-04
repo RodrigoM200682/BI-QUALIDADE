@@ -3,11 +3,22 @@ import json
 import math
 import os
 import re
+import base64
+from pathlib import Path
+from typing import Optional, Tuple
 from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import requests
+
+try:
+    from corporate_core import read_setting, write_setting, audit
+except Exception:
+    read_setting = None
+    write_setting = None
+    audit = None
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -21,11 +32,96 @@ except Exception:
 
 st.set_page_config(page_title="Carta de Inspeção CPK", layout="wide", page_icon="📊")
 
-BASE_DIR = os.path.abspath("data/cpk")
-os.makedirs(BASE_DIR, exist_ok=True)
-DATA_CPK_DIR = os.path.join(os.getcwd(), "data", "cpk")
-os.makedirs(DATA_CPK_DIR, exist_ok=True)
-MODELOS_FILE = os.path.join(DATA_CPK_DIR, "modelos_cartas_cpk.json")
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_CPK_DIR = BASE_DIR / "data" / "cpk"
+DATA_CPK_DIR.mkdir(parents=True, exist_ok=True)
+MODELOS_FILE = DATA_CPK_DIR / "modelos_cartas_cpk.json"
+
+
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return os.getenv(name, default)
+
+
+GITHUB_TOKEN = get_secret("GITHUB_TOKEN")
+GITHUB_REPO = get_secret("GITHUB_REPO")
+GITHUB_BRANCH = get_secret("GITHUB_BRANCH", "main")
+GITHUB_CPK_FILE_PATH = get_secret("GITHUB_CPK_FILE_PATH", "data/cpk/modelos_cartas_cpk.json")
+
+
+def github_cpk_enabled() -> bool:
+    return bool(GITHUB_TOKEN and GITHUB_REPO and GITHUB_BRANCH and GITHUB_CPK_FILE_PATH)
+
+
+def github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def github_cpk_api_url() -> str:
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_CPK_FILE_PATH}"
+
+
+def read_github_modelos() -> Tuple[Optional[dict], Optional[str], Optional[str]]:
+    if not github_cpk_enabled():
+        return None, None, None
+    try:
+        r = requests.get(github_cpk_api_url(), headers=github_headers(), params={"ref": GITHUB_BRANCH}, timeout=20)
+        if r.status_code == 404:
+            return None, None, None
+        r.raise_for_status()
+        payload = r.json()
+        raw = base64.b64decode(payload["content"])
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else {}, payload.get("sha"), None
+    except Exception as exc:
+        return None, None, f"Não foi possível ler os modelos CPK no GitHub: {exc}"
+
+
+def write_github_modelos(modelos: dict) -> Optional[str]:
+    if not github_cpk_enabled():
+        return None
+    _, sha, _ = read_github_modelos()
+    raw = json.dumps(modelos, ensure_ascii=False, indent=2).encode("utf-8")
+    payload = {
+        "message": "Atualiza modelos de cartas CPK",
+        "content": base64.b64encode(raw).decode("utf-8"),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        r = requests.put(github_cpk_api_url(), headers=github_headers(), json=payload, timeout=25)
+        r.raise_for_status()
+        return None
+    except Exception as exc:
+        return f"Não foi possível gravar os modelos CPK no GitHub: {exc}"
+
+
+def read_corporate_modelos() -> Optional[dict]:
+    if read_setting is None:
+        return None
+    try:
+        data = read_setting("cpk_modelos_cartas", None)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def write_corporate_modelos(modelos: dict) -> None:
+    if write_setting is None:
+        return
+    try:
+        write_setting("cpk_modelos_cartas", modelos)
+        if audit:
+            audit(None, "cpk", "save_cpk_models", f"Modelos CPK salvos: {len(modelos)}")
+    except Exception:
+        pass
 
 st.markdown(
     """
@@ -54,19 +150,61 @@ st.markdown(f"<div class='version'>{VERSION}</div>", unsafe_allow_html=True)
 # Persistência dos modelos
 # ─────────────────────────────────────────────────────────────────────────────
 def load_modelos():
-    if not os.path.exists(MODELOS_FILE):
-        return {}
+    """Carrega modelos salvos de cartas CPK com redundância.
+
+    Ordem de recuperação:
+    1) GitHub, quando os secrets estiverem configurados;
+    2) arquivo local data/cpk/modelos_cartas_cpk.json;
+    3) armazenamento corporativo SQLite;
+    4) dicionário vazio.
+    """
+    gh_data, _, gh_warn = read_github_modelos()
+    if isinstance(gh_data, dict):
+        try:
+            MODELOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MODELOS_FILE.write_text(json.dumps(gh_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_corporate_modelos(gh_data)
+        except Exception:
+            pass
+        return gh_data
+
+    if MODELOS_FILE.exists():
+        try:
+            data = json.loads(MODELOS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                write_corporate_modelos(data)
+                return data
+        except Exception:
+            pass
+
+    stored = read_corporate_modelos()
+    if isinstance(stored, dict):
+        try:
+            MODELOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MODELOS_FILE.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return stored
+
     try:
-        with open(MODELOS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        MODELOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MODELOS_FILE.write_text("{}", encoding="utf-8")
     except Exception:
-        return {}
+        pass
+    return {}
 
 
 def save_modelos(modelos):
-    with open(MODELOS_FILE, "w", encoding="utf-8") as f:
-        json.dump(modelos, f, ensure_ascii=False, indent=2)
+    modelos = modelos if isinstance(modelos, dict) else {}
+    MODELOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MODELOS_FILE.write_text(json.dumps(modelos, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_corporate_modelos(modelos)
+    warn = write_github_modelos(modelos)
+    if warn:
+        try:
+            st.warning(warn)
+        except Exception:
+            pass
 
 
 def modelo_from_state(nome):
