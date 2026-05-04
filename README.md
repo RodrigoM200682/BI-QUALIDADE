@@ -80,3 +80,37 @@ Para usar em nova inspeção:
 2. Salve a Carta de dados da nova inspeção.
 3. Vá em **Consulta de modelos** ou em **Criar inspeção > Puxar característica de modelo salvo**.
 4. Pesquise a característica e clique em incluir.
+
+
+## Atualização V8 - Backup e restauração do CPK
+
+O módulo CPK agora possui a aba **5. Backup / restauração**.
+
+Funcionalidades incluídas:
+- Baixar um Excel completo com modelos salvos, carta atual, características, medições e resultados.
+- Restaurar automaticamente a base do CPK por upload do Excel gerado pelo próprio aplicativo.
+- Persistir a última inspeção ativa em `data/cpk/cpk_estado_atual.json`.
+- Persistir os modelos de carta em `data/cpk/modelos_cartas_cpk.json`.
+
+Fluxo recomendado:
+1. Criar/salvar carta e características no módulo CPK.
+2. Salvar medições.
+3. Acessar `5. Backup / restauração`.
+4. Baixar o backup Excel completo.
+5. Em caso de perda de histórico, fazer upload deste arquivo e clicar em **Atualizar base CPK com este backup**.
+
+## V9 - Ajuste do cálculo CPK
+- Aba de análise estatística do CPK ajustada conforme guia prático anexado.
+- O cálculo agora apresenta CPS, CPI e CPK com passo a passo por característica.
+- Exportações Excel/PDF do CPK passam a apresentar CPS e CPI.
+
+
+## V10 - Restauração automática CPK
+
+No módulo CPK, a aba **5. Backup / restauração** permite baixar um Excel completo com modelos de cartas, carta ativa, características, medições e resultados. Ao fazer upload deste Excel, a base CPK é atualizada automaticamente, sem necessidade de botão adicional.
+
+Arquivos de persistência principais:
+
+- `data/cpk/modelos_cartas_cpk.json`
+- `data/cpk/cpk_estado_atual.json`
+- `data/sqdcp/sqdcp_base.xlsx`

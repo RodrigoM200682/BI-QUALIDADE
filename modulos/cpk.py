@@ -36,6 +36,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_CPK_DIR = BASE_DIR / "data" / "cpk"
 DATA_CPK_DIR.mkdir(parents=True, exist_ok=True)
 MODELOS_FILE = DATA_CPK_DIR / "modelos_cartas_cpk.json"
+CPK_STATE_FILE = DATA_CPK_DIR / "cpk_estado_atual.json"
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -207,6 +208,215 @@ def save_modelos(modelos):
             pass
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backup Excel e persistência da inspeção atual
+# ─────────────────────────────────────────────────────────────────────────────
+def _json_default(obj):
+    try:
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+    if isinstance(obj, (datetime, date)):
+        return obj.strftime("%d/%m/%Y")
+    return str(obj)
+
+
+def current_cpk_state():
+    """Retorna tudo que precisa ser recuperado se a sessão cair ou se for necessário restaurar por Excel."""
+    return {
+        "versao_backup": "CPK_BACKUP_V1",
+        "atualizado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "carta_ok": bool(st.session_state.get("carta_ok", False)),
+        "carta_dados": st.session_state.get("carta_dados", {}) or {},
+        "caracteristicas": st.session_state.get("caracteristicas", []) or [],
+        "selected_id": st.session_state.get("selected_id"),
+        "modelos": st.session_state.get("modelos", {}) or load_modelos(),
+    }
+
+
+def save_current_cpk_state():
+    """Salva a última inspeção ativa fora do session_state."""
+    try:
+        state = current_cpk_state()
+        CPK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CPK_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+        if write_setting is not None:
+            write_setting("cpk_estado_atual", state)
+        if audit:
+            audit(None, "cpk", "save_cpk_state", "Estado atual do CPK salvo")
+    except Exception:
+        pass
+
+
+def load_current_cpk_state():
+    """Carrega a última inspeção ativa salva."""
+    if CPK_STATE_FILE.exists():
+        try:
+            data = json.loads(CPK_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    if read_setting is not None:
+        try:
+            data = read_setting("cpk_estado_atual", None)
+            if isinstance(data, dict):
+                try:
+                    CPK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    CPK_STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+                except Exception:
+                    pass
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def apply_cpk_state_to_session(state: dict):
+    if not isinstance(state, dict):
+        return
+    st.session_state.carta_ok = bool(state.get("carta_ok", False))
+    st.session_state.carta_dados = state.get("carta_dados", {}) or {}
+    st.session_state.caracteristicas = state.get("caracteristicas", []) or []
+    st.session_state.selected_id = state.get("selected_id")
+    modelos = state.get("modelos")
+    if isinstance(modelos, dict):
+        st.session_state.modelos = modelos
+
+
+def cpk_backup_excel_bytes():
+    """Gera Excel de backup com modelos, carta atual, características, medições e resultados."""
+    state = current_cpk_state()
+    modelos = state.get("modelos", {}) or {}
+    carta = state.get("carta_dados", {}) or {}
+    chars = state.get("caracteristicas", []) or []
+
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        pd.DataFrame([{
+            "orientacao": "Arquivo de backup do módulo CPK. Para restaurar, faça upload deste Excel na aba Backup / restauração do próprio módulo CPK.",
+            "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            "qtd_modelos": len(modelos),
+            "qtd_caracteristicas_abertas": len(chars),
+        }]).to_excel(writer, sheet_name="LEIA_ME", index=False)
+
+        pd.DataFrame({"json_modelos": [json.dumps(modelos, ensure_ascii=False, default=_json_default)]}).to_excel(writer, sheet_name="MODELOS_JSON", index=False)
+        pd.DataFrame({"json_estado_atual": [json.dumps(state, ensure_ascii=False, default=_json_default)]}).to_excel(writer, sheet_name="ESTADO_JSON", index=False)
+        pd.DataFrame([carta] if carta else [{}]).to_excel(writer, sheet_name="CARTA_ATUAL", index=False)
+
+        linhas_chars = []
+        linhas_med = []
+        for c in chars:
+            linhas_chars.append({
+                "id": c.get("id"),
+                "descricao": c.get("descricao"),
+                "lie": c.get("lie"),
+                "lse": c.get("lse"),
+                "num_amostras": c.get("num_amostras"),
+                "num_medicoes": c.get("num_medicoes", 3),
+            })
+            for row in c.get("medicoes", []) or []:
+                base = {"id": c.get("id"), "descricao": c.get("descricao"), "Amostra": row.get("Amostra")}
+                for k, v in row.items():
+                    if str(k).startswith("Medida"):
+                        linhas_med.append({**base, "Medida": k, "Valor": v})
+        pd.DataFrame(linhas_chars).to_excel(writer, sheet_name="CARACTERISTICAS", index=False)
+        pd.DataFrame(linhas_med).to_excel(writer, sheet_name="MEDICOES", index=False)
+
+        try:
+            resultados = [calc_characteristic(c) for c in chars if characteristic_has_measurements(c)]
+            linhas_res = [{
+                "Característica": r.get("descricao"),
+                "N": r.get("n"),
+                "Média": r.get("media"),
+                "Desvio": r.get("desvio"),
+                "LIE": r.get("lie"),
+                "LSE": r.get("lse"),
+                "Cp": r.get("cp"),
+                "CPS": r.get("cps"),
+                "CPI": r.get("cpi"),
+                "Cpk": r.get("cpk"),
+                "Status": r.get("status"),
+            } for r in resultados]
+            pd.DataFrame(linhas_res).to_excel(writer, sheet_name="RESULTADOS", index=False)
+        except Exception:
+            pd.DataFrame([]).to_excel(writer, sheet_name="RESULTADOS", index=False)
+
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def restore_cpk_from_excel(file_bytes: bytes):
+    """Restaura automaticamente a base CPK a partir do Excel gerado pelo próprio app."""
+    sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, engine="openpyxl")
+    state = None
+    modelos = None
+
+    if "ESTADO_JSON" in sheets and not sheets["ESTADO_JSON"].empty:
+        raw = sheets["ESTADO_JSON"].iloc[0, 0]
+        if isinstance(raw, str) and raw.strip():
+            state = json.loads(raw)
+
+    if "MODELOS_JSON" in sheets and not sheets["MODELOS_JSON"].empty:
+        raw = sheets["MODELOS_JSON"].iloc[0, 0]
+        if isinstance(raw, str) and raw.strip():
+            modelos = json.loads(raw)
+
+    if state is None:
+        # Fallback para arquivos legíveis sem JSON: reconstrói a inspeção atual pelas abas estruturadas.
+        carta = {}
+        if "CARTA_ATUAL" in sheets and not sheets["CARTA_ATUAL"].empty:
+            carta = sheets["CARTA_ATUAL"].fillna("").to_dict("records")[0]
+        chars = []
+        med_df = sheets.get("MEDICOES", pd.DataFrame())
+        if "CARACTERISTICAS" in sheets:
+            for _, row in sheets["CARACTERISTICAS"].fillna("").iterrows():
+                cid = str(row.get("id", "")).strip() or f"C{len(chars)+1:03d}"
+                m = int(row.get("num_medicoes", 3) or 3)
+                n = int(row.get("num_amostras", 1) or 1)
+                medicoes = []
+                for i in range(1, n + 1):
+                    linha = {"Amostra": i, **{f"Medida {j}": None for j in range(1, m + 1)}}
+                    if not med_df.empty:
+                        subset = med_df[(med_df["id"].astype(str) == cid) & (pd.to_numeric(med_df["Amostra"], errors="coerce") == i)]
+                        for _, mr in subset.iterrows():
+                            medida = str(mr.get("Medida", ""))
+                            if medida in linha:
+                                linha[medida] = parse_float(mr.get("Valor"))
+                    medicoes.append(linha)
+                chars.append({
+                    "id": cid,
+                    "descricao": str(row.get("descricao", "")),
+                    "lie": parse_float(row.get("lie")),
+                    "lse": parse_float(row.get("lse")),
+                    "num_amostras": n,
+                    "num_medicoes": m,
+                    "medicoes": medicoes,
+                })
+        state = {
+            "versao_backup": "CPK_BACKUP_V1_RECONSTRUIDO",
+            "atualizado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            "carta_ok": bool(carta),
+            "carta_dados": carta,
+            "caracteristicas": chars,
+            "selected_id": chars[0]["id"] if chars else None,
+            "modelos": modelos if isinstance(modelos, dict) else load_modelos(),
+        }
+
+    if isinstance(modelos, dict):
+        state["modelos"] = modelos
+        save_modelos(modelos)
+    elif isinstance(state.get("modelos"), dict):
+        save_modelos(state.get("modelos"))
+
+    apply_cpk_state_to_session(state)
+    save_current_cpk_state()
+    return len(st.session_state.get("modelos", {}) or {}), len(st.session_state.get("caracteristicas", []) or [])
+
+
 def modelo_from_state(nome):
     return {
         "nome": nome,
@@ -262,6 +472,7 @@ def aplicar_modelo(modelo):
         })
     st.session_state.caracteristicas = chars
     st.session_state.selected_id = chars[0]["id"] if chars else None
+    save_current_cpk_state()
 
 
 def criar_caracteristica_a_partir_modelo(c, ordem=None):
@@ -327,18 +538,23 @@ def incluir_caracteristica_modelo(modelo_nome, indice_caracteristica):
     nova = criar_caracteristica_a_partir_modelo(c)
     st.session_state.caracteristicas.append(nova)
     st.session_state.selected_id = nova["id"]
+    save_current_cpk_state()
     return True, f"Característica '{nova['descricao']}' incluída na inspeção atual com os limites e plano de amostragem do modelo."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado
 # ─────────────────────────────────────────────────────────────────────────────
 def init_state():
+    saved_state = load_current_cpk_state()
+    modelos_salvos = load_modelos()
+    if isinstance(saved_state.get("modelos"), dict) and saved_state.get("modelos"):
+        modelos_salvos = saved_state.get("modelos")
     defaults = {
-        "carta_ok": False,
-        "caracteristicas": [],
-        "selected_id": None,
-        "carta_dados": {},
-        "modelos": load_modelos(),
+        "carta_ok": bool(saved_state.get("carta_ok", False)),
+        "caracteristicas": saved_state.get("caracteristicas", []) or [],
+        "selected_id": saved_state.get("selected_id"),
+        "carta_dados": saved_state.get("carta_dados", {}) or {},
+        "modelos": modelos_salvos,
         "char_form_nonce": 0,
     }
     for k, v in defaults.items():
@@ -374,19 +590,21 @@ def calc_stats(samples, lse=None, lie=None):
     std = math.sqrt(variance)
     if std == 0:
         return None
-    cp = cpu = cpl = cpk = None
+    cp = cps = cpi = cpk = None
     if lse is not None and lie is not None:
+        # Conforme o guia: CPS = capacidade superior e CPI = capacidade inferior.
+        # O CPK é o menor valor entre CPS e CPI.
         cp = (lse - lie) / (6 * std)
-        cpu = (lse - mean) / (3 * std)
-        cpl = (mean - lie) / (3 * std)
-        cpk = min(cpu, cpl)
+        cps = (lse - mean) / (3 * std)
+        cpi = (mean - lie) / (3 * std)
+        cpk = min(cps, cpi)
     elif lse is not None:
-        cpu = (lse - mean) / (3 * std)
-        cpk = cpu
+        cps = (lse - mean) / (3 * std)
+        cpk = cps
     elif lie is not None:
-        cpl = (mean - lie) / (3 * std)
-        cpk = cpl
-    return {"vals": vals, "n": n, "mean": mean, "std": std, "cp": cp, "cpu": cpu, "cpl": cpl, "cpk": cpk}
+        cpi = (mean - lie) / (3 * std)
+        cpk = cpi
+    return {"vals": vals, "n": n, "mean": mean, "std": std, "cp": cp, "cps": cps, "cpi": cpi, "cpk": cpk}
 
 
 def classify_cpk(cpk):
@@ -442,12 +660,68 @@ def calc_characteristic(char):
         "media": round(s["mean"], 4) if s else None,
         "desvio": round(s["std"], 4) if s else None,
         "cp": round(s["cp"], 4) if s and s["cp"] is not None else None,
-        "cpu": round(s["cpu"], 4) if s and s["cpu"] is not None else None,
-        "cpl": round(s["cpl"], 4) if s and s["cpl"] is not None else None,
+        "cps": round(s["cps"], 4) if s and s["cps"] is not None else None,
+        "cpi": round(s["cpi"], 4) if s and s["cpi"] is not None else None,
         "cpk": round(s["cpk"], 4) if s and s["cpk"] is not None else None,
     }
     result["status"] = classify_cpk(result["cpk"])
     return result
+
+
+def cpk_formula_rows(result):
+    """Monta o passo a passo do cálculo seguindo o Guia Prático de CPK."""
+    lie = result.get("lie")
+    lse = result.get("lse")
+    media = result.get("media")
+    desvio = result.get("desvio")
+    cps = result.get("cps")
+    cpi = result.get("cpi")
+    cpk = result.get("cpk")
+    if media is None or desvio is None or desvio == 0:
+        return pd.DataFrame([{
+            "Passo": "Pré-requisito",
+            "Indicador": "Medições válidas",
+            "Fórmula / regra": "É necessário ter pelo menos 2 medições válidas e desvio padrão maior que zero.",
+            "Resultado": "Sem cálculo",
+        }])
+    return pd.DataFrame([
+        {"Passo": "1", "Indicador": "LIE", "Fórmula / regra": "Limite inferior definido por especificação", "Resultado": lie},
+        {"Passo": "1", "Indicador": "LSE", "Fórmula / regra": "Limite superior definido por especificação", "Resultado": lse},
+        {"Passo": "2", "Indicador": "n", "Fórmula / regra": "Quantidade de medições válidas coletadas", "Resultado": result.get("n")},
+        {"Passo": "3", "Indicador": "Média x̄", "Fórmula / regra": "Soma das medições ÷ quantidade de medições", "Resultado": media},
+        {"Passo": "4", "Indicador": "Desvio padrão σ", "Fórmula / regra": "Dispersão dos valores em relação à média", "Resultado": desvio},
+        {"Passo": "5", "Indicador": "CPS", "Fórmula / regra": f"(LSE - média) / (3 × σ) = ({lse} - {media}) / (3 × {desvio})", "Resultado": cps},
+        {"Passo": "6", "Indicador": "CPI", "Fórmula / regra": f"(média - LIE) / (3 × σ) = ({media} - {lie}) / (3 × {desvio})", "Resultado": cpi},
+        {"Passo": "7", "Indicador": "CPK", "Fórmula / regra": "Menor valor entre CPS e CPI", "Resultado": cpk},
+    ])
+
+
+def render_cpk_reference_card():
+    st.markdown("#### Modelo de cálculo utilizado")
+    st.markdown(
+        "<div class='orange-help'>"
+        "O cálculo segue o conceito: <b>CPK = menor valor entre CPS e CPI</b>. "
+        "CPS mede a distância da média até o limite superior; CPI mede a distância da média até o limite inferior. "
+        "O menor deles indica o lado mais crítico da especificação."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**CPS**  \n`(LSE - média) / (3 × desvio padrão)`")
+    c2.markdown("**CPI**  \n`(média - LIE) / (3 × desvio padrão)`")
+    c3.markdown("**CPK**  \n`min(CPS; CPI)`")
+
+
+def interpretar_lado_critico(result):
+    cps = result.get("cps")
+    cpi = result.get("cpi")
+    if cps is None or cpi is None:
+        return "Lado crítico não calculado."
+    if cps < cpi:
+        return "O lado crítico é o limite superior, pois CPS é menor que CPI."
+    if cpi < cps:
+        return "O lado crítico é o limite inferior, pois CPI é menor que CPS."
+    return "O processo está aproximadamente centralizado entre os limites, pois CPS e CPI são iguais ou muito próximos."
 
 
 def characteristic_has_measurements(char):
@@ -625,10 +899,10 @@ def make_pdf(carta, results):
     t_resp.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
     story.append(t_resp)
     story.append(Spacer(1, 4*mm))
-    rows = [["Característica", "Amostras", "Med./am.", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "Cpk", "Status"]]
+    rows = [["Característica", "Amostras", "Med./am.", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPS", "CPI", "Cpk", "Status"]]
     for r in results:
-        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r.get("medicoes_por_amostra", ""), r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r["cpk"], r["status"]])
-    tb = Table(rows, colWidths=[W*.23, W*.075, W*.065, W*.04, W*.075, W*.075, W*.07, W*.07, W*.055, W*.06, W*.095], repeatRows=1)
+        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r.get("medicoes_por_amostra", ""), r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r.get("cps"), r.get("cpi"), r["cpk"], r["status"]])
+    tb = Table(rows, colWidths=[W*.19, W*.065, W*.055, W*.035, W*.065, W*.065, W*.055, W*.055, W*.045, W*.045, W*.045, W*.05, W*.08], repeatRows=1)
     tb.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 6.2), ("BACKGROUND", (0,0),(-1,0), colors.lightgrey)]))
     story.append(tb)
     story.append(Spacer(1, 5*mm))
@@ -655,7 +929,7 @@ def make_pdf(carta, results):
 st.title("📊 Carta de Inspeção CPK")
 st.caption("Fluxo: modelo salvo → carta de dados → características sem duplicidade → medições por amostra → análise somente das cartas preenchidas → parecer automático.")
 
-tab0, tab1, tab2, tab3, tab4 = st.tabs(["0. Consulta de modelos", "1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística"])
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(["0. Consulta de modelos", "1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística", "5. Backup / restauração"])
 
 
 with tab0:
@@ -784,6 +1058,7 @@ with tab1:
                 "corpo_mat": corpo_mat, "fundo_mat": fundo_mat, "obs": obs,
                 "responsavel_nome": responsavel_nome.strip(), "responsavel_chapa": responsavel_chapa.strip(),
             }
+            save_current_cpk_state()
             st.success("Carta salva. A aba 'Criar inspeção' está liberada.")
 
     if st.session_state.carta_ok:
@@ -850,6 +1125,7 @@ with tab2:
                 })
                 st.session_state.selected_id = new_id
                 st.session_state.char_form_nonce += 1
+                save_current_cpk_state()
                 st.success("Característica criada e habilitada para utilização. Os campos foram limpos para nova inclusão.")
                 st.rerun()
 
@@ -873,6 +1149,7 @@ with tab2:
                 else:
                     st.session_state.modelos[nome_modelo.strip()] = modelo_from_state(nome_modelo.strip())
                     save_modelos(st.session_state.modelos)
+                    save_current_cpk_state()
                     st.success("Modelo salvo. Ele será carregado automaticamente como opção quando o aplicativo for reiniciado.")
 
 with tab3:
@@ -914,10 +1191,12 @@ with tab3:
                 st.error(f"As amostras {incompletas} estão parcialmente preenchidas. Cada amostra registrada deve ter {len(keys_medicao)} medição(ões).")
             else:
                 char["medicoes"] = registros
+                save_current_cpk_state()
                 st.success("Medições salvas. A análise estatística já pode ser consultada na aba 4.")
 
 with tab4:
-    st.subheader("Análise estatística e parecer do processo")
+    st.subheader("Análise estatística e cálculo do CPK")
+    render_cpk_reference_card()
     if not st.session_state.caracteristicas:
         st.warning("Não há características criadas para análise.")
     else:
@@ -946,9 +1225,16 @@ with tab4:
             "Característica": r["descricao"], "Amostras completas": f"{r['amostras_completas']}/{r['amostras_previstas']}",
             "Medições/amostra": r.get("medicoes_por_amostra"), "Medições realizadas": r["medidas_realizadas"], "N": r["n"], "Média": r["media"],
             "Desvio": r["desvio"], "LIE": r["lie"], "LSE": r["lse"], "Cp": r["cp"],
-            "CPU": r["cpu"], "CPL": r["cpl"], "Cpk": r["cpk"], "Status": r["status"],
+            "CPS": r["cps"], "CPI": r["cpi"], "Cpk": r["cpk"], "Status": r["status"],
         } for r in results])
         st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Passo a passo do cálculo por característica")
+        labels_calc = {f"{r['descricao']} | CPK {r['cpk'] if r.get('cpk') is not None else '—'}": i for i, r in enumerate(results)}
+        label_calc = st.selectbox("Selecione a característica para visualizar o cálculo detalhado", list(labels_calc.keys()))
+        result_calc = results[labels_calc[label_calc]]
+        st.dataframe(cpk_formula_rows(result_calc), use_container_width=True, hide_index=True)
+        st.info(interpretar_lado_critico(result_calc))
 
         st.markdown("#### Gráficos das coletas por característica")
         for r in results:
@@ -977,3 +1263,52 @@ with tab4:
                 st.download_button("Baixar relatório PDF", pdf, file_name=f"relatorio_cpk_{datetime.now().strftime('%d_%m_%Y_%H%M')}.pdf", mime="application/pdf", use_container_width=True)
             else:
                 st.warning("Inclua reportlab no requirements.txt para exportar PDF.")
+
+
+with tab5:
+    st.subheader("Backup e restauração da base CPK")
+    st.markdown(
+        "<div class='orange-help'>Use esta tela para baixar um Excel com todos os modelos salvos, carta atual, características, medições e resultados. "
+        "Se o histórico local for perdido, faça upload deste mesmo arquivo para restaurar automaticamente a base do módulo CPK.</div>",
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Modelos salvos", len(st.session_state.get("modelos", {}) or {}))
+    c2.metric("Características abertas", len(st.session_state.get("caracteristicas", []) or []))
+    c3.metric("Carta ativa", "Sim" if st.session_state.get("carta_ok") else "Não")
+
+    st.download_button(
+        "📥 Baixar backup Excel completo do CPK",
+        data=cpk_backup_excel_bytes(),
+        file_name=f"backup_cpk_completo_{datetime.now().strftime('%d_%m_%Y_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    st.markdown("#### Restaurar base a partir de backup")
+    st.info(
+        "Ao selecionar o arquivo Excel de backup, o aplicativo atualiza automaticamente a base CPK, "
+        "incluindo modelos de carta, carta ativa, características, medições e resultados salvos."
+    )
+    arquivo_backup = st.file_uploader(
+        "Enviar backup Excel gerado pelo módulo CPK",
+        type=["xlsx"],
+        key="upload_backup_cpk_auto",
+    )
+    if arquivo_backup is not None:
+        backup_bytes = arquivo_backup.getvalue()
+        backup_key = f"{arquivo_backup.name}_{len(backup_bytes)}"
+        if st.session_state.get("ultimo_backup_cpk_restaurado") != backup_key:
+            try:
+                qtd_modelos, qtd_chars = restore_cpk_from_excel(backup_bytes)
+                st.session_state["ultimo_backup_cpk_restaurado"] = backup_key
+                st.success(
+                    f"Base CPK atualizada automaticamente. Modelos restaurados: {qtd_modelos}. "
+                    f"Características abertas restauradas: {qtd_chars}."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível restaurar o backup CPK: {exc}")
+        else:
+            st.success("Este backup já foi aplicado nesta sessão. A base CPK está atualizada.")
