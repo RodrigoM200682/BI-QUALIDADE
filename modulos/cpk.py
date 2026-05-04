@@ -263,6 +263,72 @@ def aplicar_modelo(modelo):
     st.session_state.caracteristicas = chars
     st.session_state.selected_id = chars[0]["id"] if chars else None
 
+
+def criar_caracteristica_a_partir_modelo(c, ordem=None):
+    """Cria uma característica nova, sem medições, usando parâmetros de um modelo salvo."""
+    n = int(c.get("num_amostras", 1) or 1)
+    m = int(c.get("num_medicoes", 3) or 3)
+    ordem = ordem or (len(st.session_state.get("caracteristicas", [])) + 1)
+    descricao = str(c.get("descricao", "")).strip()
+    return {
+        "id": f"C{ordem:03d}_{datetime.now().strftime('%H%M%S%f')}",
+        "descricao": descricao,
+        "lie": float(c.get("lie")),
+        "lse": float(c.get("lse")),
+        "num_amostras": n,
+        "num_medicoes": m,
+        "medicoes": [{"Amostra": i, **{f"Medida {j}": None for j in range(1, m + 1)}} for i in range(1, n + 1)],
+    }
+
+
+def consultar_caracteristicas_modelos(modelos, termo=""):
+    """Retorna uma tabela pesquisável com todas as características salvas nos modelos."""
+    termo_norm = descricao_normalizada(termo)
+    linhas = []
+    for nome_modelo, modelo in sorted((modelos or {}).items()):
+        base = modelo.get("carta_base", {}) if isinstance(modelo, dict) else {}
+        for idx, c in enumerate(modelo.get("caracteristicas", []) if isinstance(modelo, dict) else [], start=1):
+            descricao = str(c.get("descricao", "")).strip()
+            texto_busca = descricao_normalizada(" ".join([
+                nome_modelo,
+                descricao,
+                str(base.get("linha", "")),
+                str(base.get("embalagem", "")),
+            ]))
+            if termo_norm and termo_norm not in texto_busca:
+                continue
+            linhas.append({
+                "chave": f"{nome_modelo}||{idx-1}",
+                "Modelo": nome_modelo,
+                "Característica": descricao,
+                "LIE": c.get("lie"),
+                "LSE": c.get("lse"),
+                "Amostras": c.get("num_amostras"),
+                "Medições/amostra": c.get("num_medicoes", 3),
+                "Linha modelo": base.get("linha", ""),
+                "Embalagem modelo": base.get("embalagem", ""),
+                "Criado em": modelo.get("criado_em", ""),
+            })
+    return linhas
+
+
+def incluir_caracteristica_modelo(modelo_nome, indice_caracteristica):
+    modelos = st.session_state.get("modelos", {})
+    modelo = modelos.get(modelo_nome)
+    if not modelo:
+        return False, "Modelo não localizado."
+    caracteristicas_modelo = modelo.get("caracteristicas", [])
+    if indice_caracteristica < 0 or indice_caracteristica >= len(caracteristicas_modelo):
+        return False, "Característica não localizada dentro do modelo."
+    c = caracteristicas_modelo[indice_caracteristica]
+    desc_norm = descricao_normalizada(c.get("descricao"))
+    if any(descricao_normalizada(x.get("descricao")) == desc_norm for x in st.session_state.get("caracteristicas", [])):
+        return False, f"A característica '{c.get('descricao')}' já está aberta nesta inspeção."
+    nova = criar_caracteristica_a_partir_modelo(c)
+    st.session_state.caracteristicas.append(nova)
+    st.session_state.selected_id = nova["id"]
+    return True, f"Característica '{nova['descricao']}' incluída na inspeção atual com os limites e plano de amostragem do modelo."
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,7 +655,54 @@ def make_pdf(carta, results):
 st.title("📊 Carta de Inspeção CPK")
 st.caption("Fluxo: modelo salvo → carta de dados → características sem duplicidade → medições por amostra → análise somente das cartas preenchidas → parecer automático.")
 
-tab1, tab2, tab3, tab4 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística"])
+tab0, tab1, tab2, tab3, tab4 = st.tabs(["0. Consulta de modelos", "1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística"])
+
+
+with tab0:
+    st.subheader("Consulta de modelos de carta")
+    st.markdown(
+        "<div class='orange-help'>Use esta consulta para localizar uma característica já padronizada em modelos anteriores. "
+        "Ao iniciar uma nova inspeção, salve primeiro a Carta de dados e depois inclua a característica pelo modelo para manter LIE, LSE, quantidade de amostras e medições por amostra.</div>",
+        unsafe_allow_html=True,
+    )
+    modelos = st.session_state.get("modelos", {})
+    if not modelos:
+        st.warning("Ainda não há modelos salvos. Crie uma inspeção, cadastre as características e use 'Salvar modelo da carta'.")
+    else:
+        termo_modelo = st.text_input("Pesquisar por característica, modelo, linha ou embalagem", placeholder="Ex.: pestana, diâmetro, GL, aerossol")
+        linhas_modelos = consultar_caracteristicas_modelos(modelos, termo_modelo)
+        if not linhas_modelos:
+            st.info("Nenhuma característica localizada para o filtro informado.")
+        else:
+            df_consulta = pd.DataFrame(linhas_modelos)
+            st.dataframe(
+                df_consulta.drop(columns=["chave"]),
+                use_container_width=True,
+                hide_index=True,
+                height=320,
+            )
+            opcoes = {
+                f"{r['Característica']} | Modelo: {r['Modelo']} | LIE {r['LIE']} | LSE {r['LSE']}": r["chave"]
+                for r in linhas_modelos
+            }
+            escolha = st.selectbox("Selecionar característica/modelo para reutilizar", list(opcoes.keys()))
+            modelo_nome, idx_txt = opcoes[escolha].split("||")
+            idx_char = int(idx_txt)
+            c1, c2 = st.columns(2)
+            if c1.button("Carregar modelo completo", use_container_width=True, type="primary"):
+                aplicar_modelo(modelos[modelo_nome])
+                st.session_state.carta_ok = False
+                st.success("Modelo completo carregado. Complete os dados variáveis na aba 'Carta de dados' e salve a carta.")
+                st.rerun()
+            if c2.button("Incluir somente esta característica na inspeção atual", use_container_width=True, type="primary", disabled=not st.session_state.get("carta_ok", False)):
+                ok, msg = incluir_caracteristica_modelo(modelo_nome, idx_char)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            if not st.session_state.get("carta_ok", False):
+                st.caption("Para incluir somente uma característica, primeiro salve a Carta de dados da nova inspeção.")
 
 with tab1:
     st.subheader("Carta de dados — materiais e identificação")
@@ -682,6 +795,29 @@ with tab2:
         st.warning("Primeiro salve a Carta de dados na aba 1.")
     else:
         st.markdown("<div class='orange-help'>O botão de criação fica em laranja para indicar inclusão/edição. Após a característica estar criada e disponível para uso, os botões de abertura e exportação aparecem em verde.</div>", unsafe_allow_html=True)
+
+        modelos_rapidos = st.session_state.get("modelos", {})
+        if modelos_rapidos:
+            with st.expander("🔎 Puxar característica de modelo salvo", expanded=False):
+                termo_rapido = st.text_input("Buscar característica salva", placeholder="Ex.: pestana, diâmetro, altura", key="busca_modelo_rapida")
+                linhas_rapidas = consultar_caracteristicas_modelos(modelos_rapidos, termo_rapido)
+                if linhas_rapidas:
+                    opcoes_rapidas = {
+                        f"{r['Característica']} | Modelo: {r['Modelo']} | LIE {r['LIE']} | LSE {r['LSE']}": r["chave"]
+                        for r in linhas_rapidas
+                    }
+                    escolha_rapida = st.selectbox("Modelo/característica", list(opcoes_rapidas.keys()), key="sel_modelo_rapido")
+                    modelo_nome_rapido, idx_txt_rapido = opcoes_rapidas[escolha_rapida].split("||")
+                    if st.button("Incluir característica selecionada nesta inspeção", use_container_width=True, type="primary", key="btn_incluir_modelo_rapido"):
+                        ok, msg = incluir_caracteristica_modelo(modelo_nome_rapido, int(idx_txt_rapido))
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                else:
+                    st.info("Nenhuma característica encontrada nos modelos salvos para este filtro.")
+
         nonce = st.session_state.char_form_nonce
         with st.form(f"form_caracteristica_{nonce}"):
             descricao = st.text_input("Descrição da característica *", placeholder="Ex.: Diâmetro interno, pestana, altura, profundidade de expansão", key=f"desc_char_{nonce}")

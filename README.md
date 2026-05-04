@@ -63,3 +63,20 @@ GITHUB_CPK_FILE_PATH = "data/cpk/modelos_cartas_cpk.json"
 ```
 
 Sem estes secrets, a persistência funciona durante uso normal do app, mas pode ser perdida em redeploy/rebuild do Streamlit Cloud.
+
+## Ajuste V7 - Consulta de modelos CPK
+
+O módulo CPK agora possui a aba **0. Consulta de modelos**, permitindo pesquisar modelos salvos por característica, linha, embalagem ou nome do modelo.
+
+Funcionalidades incluídas:
+- visualizar todas as características salvas em modelos de carta;
+- carregar o modelo completo;
+- incluir somente uma característica salva na inspeção atual;
+- manter LIE, LSE, número de amostras e número de medições por amostra do modelo original;
+- impedir duplicidade de característica dentro da inspeção aberta.
+
+Para usar em nova inspeção:
+1. Abra o módulo CPK.
+2. Salve a Carta de dados da nova inspeção.
+3. Vá em **Consulta de modelos** ou em **Criar inspeção > Puxar característica de modelo salvo**.
+4. Pesquise a característica e clique em incluir.
