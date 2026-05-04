@@ -307,6 +307,37 @@ def cpk_backup_excel_bytes():
         pd.DataFrame({"json_estado_atual": [json.dumps(state, ensure_ascii=False, default=_json_default)]}).to_excel(writer, sheet_name="ESTADO_JSON", index=False)
         pd.DataFrame([carta] if carta else [{}]).to_excel(writer, sheet_name="CARTA_ATUAL", index=False)
 
+        # Abas estruturadas de modelos: este é o modelo oficial de dados salvo pelo app.
+        # O backup pode ser restaurado mesmo se as abas JSON forem perdidas.
+        linhas_modelos = []
+        linhas_modelo_chars = []
+        for nome_modelo, modelo in modelos.items():
+            base = modelo.get("carta_base", {}) or {}
+            linhas_modelos.append({
+                "modelo": nome_modelo,
+                "criado_em": modelo.get("criado_em", ""),
+                "linha": base.get("linha", ""),
+                "embalagem": base.get("embalagem", ""),
+                "domo_mat": base.get("domo_mat", ""),
+                "esp_domo": base.get("esp_domo", ""),
+                "corpo_mat": base.get("corpo_mat", ""),
+                "esp_corpo": base.get("esp_corpo", ""),
+                "fundo_mat": base.get("fundo_mat", ""),
+                "esp_fundo": base.get("esp_fundo", ""),
+            })
+            for idx, ch in enumerate(modelo.get("caracteristicas", []) or [], start=1):
+                linhas_modelo_chars.append({
+                    "modelo": nome_modelo,
+                    "ordem": idx,
+                    "descricao": ch.get("descricao", ""),
+                    "lie": ch.get("lie"),
+                    "lse": ch.get("lse"),
+                    "num_amostras": ch.get("num_amostras", 1),
+                    "num_medicoes": ch.get("num_medicoes", 3),
+                })
+        pd.DataFrame(linhas_modelos).to_excel(writer, sheet_name="MODELOS", index=False)
+        pd.DataFrame(linhas_modelo_chars).to_excel(writer, sheet_name="MODELO_CARACTERISTICAS", index=False)
+
         linhas_chars = []
         linhas_med = []
         for c in chars:
@@ -364,6 +395,41 @@ def restore_cpk_from_excel(file_bytes: bytes):
         raw = sheets["MODELOS_JSON"].iloc[0, 0]
         if isinstance(raw, str) and raw.strip():
             modelos = json.loads(raw)
+
+    if modelos is None and "MODELOS" in sheets and "MODELO_CARACTERISTICAS" in sheets:
+        modelos = {}
+        modelos_df = sheets["MODELOS"].fillna("")
+        chars_modelos_df = sheets["MODELO_CARACTERISTICAS"].fillna("")
+        for _, mrow in modelos_df.iterrows():
+            nome = str(mrow.get("modelo", "")).strip()
+            if not nome:
+                continue
+            modelos[nome] = {
+                "nome": nome,
+                "criado_em": str(mrow.get("criado_em", "")),
+                "carta_base": {
+                    "linha": str(mrow.get("linha", "")),
+                    "embalagem": str(mrow.get("embalagem", "")),
+                    "domo_mat": str(mrow.get("domo_mat", "")),
+                    "esp_domo": str(mrow.get("esp_domo", "")),
+                    "corpo_mat": str(mrow.get("corpo_mat", "")),
+                    "esp_corpo": str(mrow.get("esp_corpo", "")),
+                    "fundo_mat": str(mrow.get("fundo_mat", "")),
+                    "esp_fundo": str(mrow.get("esp_fundo", "")),
+                },
+                "caracteristicas": [],
+            }
+        for _, crow in chars_modelos_df.iterrows():
+            nome = str(crow.get("modelo", "")).strip()
+            if nome not in modelos:
+                continue
+            modelos[nome]["caracteristicas"].append({
+                "descricao": str(crow.get("descricao", "")),
+                "lie": parse_float(crow.get("lie")),
+                "lse": parse_float(crow.get("lse")),
+                "num_amostras": int(parse_float(crow.get("num_amostras")) or 1),
+                "num_medicoes": int(parse_float(crow.get("num_medicoes")) or 3),
+            })
 
     if state is None:
         # Fallback para arquivos legíveis sem JSON: reconstrói a inspeção atual pelas abas estruturadas.
@@ -766,9 +832,6 @@ def control_chart(result):
     if len(vals) < 2:
         return None
     mean = sum(vals) / len(vals)
-    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
-    ucl = mean + 3 * std
-    lcl = mean - 3 * std
     x = list(range(1, len(vals) + 1))
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -780,8 +843,6 @@ def control_chart(result):
         marker=dict(size=7),
     ))
     # A média aparece no título para não poluir o gráfico com mais uma linha.
-    fig.add_hline(y=ucl, line_dash="dash", line_color="#ff4d4d", line_width=3, annotation_text="LSC", annotation_font_color="#ff4d4d")
-    fig.add_hline(y=lcl, line_dash="dash", line_color="#ff4d4d", line_width=3, annotation_text="LIC", annotation_font_color="#ff4d4d")
     if result.get("lse") is not None:
         fig.add_hline(y=result["lse"], line_dash="solid", line_color="#ff4d4d", line_width=4, annotation_text="LSE", annotation_font_color="#ff4d4d")
     if result.get("lie") is not None:
@@ -807,12 +868,9 @@ def pdf_chart_drawing(result, W):
     if len(vals) < 2:
         return None
     mean = sum(vals) / len(vals)
-    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
-    ucl = mean + 3 * std
-    lcl = mean - 3 * std
     lse = result.get("lse")
     lie = result.get("lie")
-    all_v = vals + [ucl, lcl] + ([lse] if lse is not None else []) + ([lie] if lie is not None else [])
+    all_v = vals + ([lse] if lse is not None else []) + ([lie] if lie is not None else [])
     vmn, vmx = min(all_v), max(all_v)
     vr = vmx - vmn or 0.001
     DW, DH = W, 42 * mm
@@ -837,8 +895,6 @@ def pdf_chart_drawing(result, W):
         d.add(String(PAD_L + CW + 2, y - 2, label, fontSize=5.5, fillColor=col))
 
     red = colors.HexColor("#cc0000")
-    hline(ucl, red, "LSC", width=1.4, dash=[2, 2])
-    hline(lcl, red, "LIC", width=1.4, dash=[2, 2])
     if lse is not None:
         hline(lse, red, "LSE", width=2.2)
     if lie is not None:
@@ -927,56 +983,10 @@ def make_pdf(carta, results):
 # Interface
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("📊 Carta de Inspeção CPK")
-st.caption("Fluxo: modelo salvo → carta de dados → características sem duplicidade → medições por amostra → análise somente das cartas preenchidas → parecer automático.")
+st.caption("Fluxo: carta de dados → modelo salvo/carregado → características sem duplicidade → medições por amostra → cálculo CPK por LIE/LSE → backup/restauração.")
 
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(["0. Consulta de modelos", "1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística", "5. Backup / restauração"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística", "5. Backup / restauração"])
 
-
-with tab0:
-    st.subheader("Consulta de modelos de carta")
-    st.markdown(
-        "<div class='orange-help'>Use esta consulta para localizar uma característica já padronizada em modelos anteriores. "
-        "Ao iniciar uma nova inspeção, salve primeiro a Carta de dados e depois inclua a característica pelo modelo para manter LIE, LSE, quantidade de amostras e medições por amostra.</div>",
-        unsafe_allow_html=True,
-    )
-    modelos = st.session_state.get("modelos", {})
-    if not modelos:
-        st.warning("Ainda não há modelos salvos. Crie uma inspeção, cadastre as características e use 'Salvar modelo da carta'.")
-    else:
-        termo_modelo = st.text_input("Pesquisar por característica, modelo, linha ou embalagem", placeholder="Ex.: pestana, diâmetro, GL, aerossol")
-        linhas_modelos = consultar_caracteristicas_modelos(modelos, termo_modelo)
-        if not linhas_modelos:
-            st.info("Nenhuma característica localizada para o filtro informado.")
-        else:
-            df_consulta = pd.DataFrame(linhas_modelos)
-            st.dataframe(
-                df_consulta.drop(columns=["chave"]),
-                use_container_width=True,
-                hide_index=True,
-                height=320,
-            )
-            opcoes = {
-                f"{r['Característica']} | Modelo: {r['Modelo']} | LIE {r['LIE']} | LSE {r['LSE']}": r["chave"]
-                for r in linhas_modelos
-            }
-            escolha = st.selectbox("Selecionar característica/modelo para reutilizar", list(opcoes.keys()))
-            modelo_nome, idx_txt = opcoes[escolha].split("||")
-            idx_char = int(idx_txt)
-            c1, c2 = st.columns(2)
-            if c1.button("Carregar modelo completo", use_container_width=True, type="primary"):
-                aplicar_modelo(modelos[modelo_nome])
-                st.session_state.carta_ok = False
-                st.success("Modelo completo carregado. Complete os dados variáveis na aba 'Carta de dados' e salve a carta.")
-                st.rerun()
-            if c2.button("Incluir somente esta característica na inspeção atual", use_container_width=True, type="primary", disabled=not st.session_state.get("carta_ok", False)):
-                ok, msg = incluir_caracteristica_modelo(modelo_nome, idx_char)
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-            if not st.session_state.get("carta_ok", False):
-                st.caption("Para incluir somente uma característica, primeiro salve a Carta de dados da nova inspeção.")
 
 with tab1:
     st.subheader("Carta de dados — materiais e identificação")
@@ -1268,8 +1278,8 @@ with tab4:
 with tab5:
     st.subheader("Backup e restauração da base CPK")
     st.markdown(
-        "<div class='orange-help'>Use esta tela para baixar um Excel com todos os modelos salvos, carta atual, características, medições e resultados. "
-        "Se o histórico local for perdido, faça upload deste mesmo arquivo para restaurar automaticamente a base do módulo CPK.</div>",
+        "<div class='orange-help'>Use esta tela para baixar um Excel estruturado com o mesmo modelo de dados utilizado pelo app: modelos salvos, carta ativa, características, medições e resultados. "
+        "Se o histórico local for perdido, faça upload deste mesmo arquivo para atualizar automaticamente a base do módulo CPK e deixar os modelos disponíveis novamente para novas inspeções.</div>",
         unsafe_allow_html=True,
     )
 
@@ -1289,7 +1299,7 @@ with tab5:
     st.markdown("#### Restaurar base a partir de backup")
     st.info(
         "Ao selecionar o arquivo Excel de backup, o aplicativo atualiza automaticamente a base CPK, "
-        "incluindo modelos de carta, carta ativa, características, medições e resultados salvos."
+        "incluindo modelos de carta, carta ativa, características, medições e resultados salvos. Os modelos restaurados ficam disponíveis imediatamente na aba Carta de dados."
     )
     arquivo_backup = st.file_uploader(
         "Enviar backup Excel gerado pelo módulo CPK",
