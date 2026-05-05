@@ -21,7 +21,7 @@ except Exception:
     audit = None
 
 try:
-    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -1053,68 +1053,202 @@ def pdf_chart_drawing(result, W):
 
 
 def make_pdf(carta, results):
+    """Gera relatório PDF formal em A4 paisagem, com fonte 12 e tabelas com quebra automática.
+
+    Regras aplicadas:
+    - fonte base 12 em textos e tabelas;
+    - tabelas ocupando 100% da largura útil da folha;
+    - conteúdo convertido em Paragraph para quebrar linha dentro da célula;
+    - altura das linhas ajustada automaticamente;
+    - sem LIC/LSC, mantendo apenas LIE/LSE como limites de especificação.
+    """
     if A4 is None:
         return None
+
+    def fmt_br(value, casas=2):
+        if value is None or value == "":
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        if isinstance(value, (int, float)):
+            return f"{float(value):.{casas}f}".replace(".", ",")
+        return str(value)
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=14*mm)
-    W = A4[0] - 24*mm
+    page_size = landscape(A4)
+    margin = 10 * mm
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=page_size,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+    )
+    W = page_size[0] - (2 * margin)
+
     styles = getSampleStyleSheet()
-    def S(name, **kw):
-        return ParagraphStyle(name, parent=styles["Normal"], **kw)
     TEXT = colors.HexColor("#111111")
     MUTED = colors.HexColor("#555555")
+    GREEN = colors.HexColor("#D9EAD3")
+    YELLOW = colors.HexColor("#FFF2CC")
+    RED = colors.HexColor("#F4CCCC")
+    HEADER = colors.HexColor("#D9EAD3")
+    GRID = colors.HexColor("#777777")
+
+    title_style = ParagraphStyle(
+        "TituloFormal",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=TEXT,
+        alignment=1,
+        spaceAfter=6,
+    )
+    section_style = ParagraphStyle(
+        "SecaoFormal",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=TEXT,
+        spaceBefore=6,
+        spaceAfter=4,
+    )
+    normal_style = ParagraphStyle(
+        "TextoFormal",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=12,
+        leading=15,
+        textColor=TEXT,
+        wordWrap="CJK",
+    )
+    small_style = ParagraphStyle(
+        "TextoTabelaFormal",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=12,
+        leading=14,
+        textColor=TEXT,
+        wordWrap="CJK",
+    )
+    header_style = ParagraphStyle(
+        "CabecalhoTabelaFormal",
+        parent=small_style,
+        fontName="Helvetica-Bold",
+        alignment=1,
+    )
+
+    def P(value, style=small_style):
+        txt = fmt_br(value)
+        txt = txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return Paragraph(txt, style)
+
+    def build_table(data, col_widths, header=False, header_rows=0):
+        converted = []
+        for r, row in enumerate(data):
+            style = header_style if (header and r < header_rows) else small_style
+            converted.append([P(cell, style) for cell in row])
+        tbl = Table(converted, colWidths=col_widths, repeatRows=header_rows, hAlign="LEFT")
+        style_cmds = [
+            ("GRID", (0, 0), (-1, -1), 0.45, GRID),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]
+        if header and header_rows:
+            style_cmds.extend([
+                ("BACKGROUND", (0, 0), (-1, header_rows - 1), HEADER),
+                ("FONTNAME", (0, 0), (-1, header_rows - 1), "Helvetica-Bold"),
+            ])
+        tbl.setStyle(TableStyle(style_cmds))
+        return tbl
+
     story = []
-    story.append(Paragraph("<b>Relatório de Carta de Inspeção e CPK</b>", S("title", fontSize=15, textColor=TEXT, fontName="Helvetica-Bold")))
-    story.append(Paragraph(f"Gerado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", S("sub", fontSize=8, textColor=MUTED)))
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph("<b>Dados dos materiais</b>", S("sec_mat", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    story.append(Paragraph("RELATÓRIO FORMAL DE CARTA DE INSPEÇÃO E CPK", title_style))
+    story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", normal_style))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph("1. Dados dos materiais", section_style))
     dados_materiais = [
         ["Usina domo", carta.get("domo_mat", ""), "Espessura domo", carta.get("esp_domo", "")],
         ["Usina corpo", carta.get("corpo_mat", ""), "Espessura corpo", carta.get("esp_corpo", "")],
         ["Usina fundo", carta.get("fundo_mat", ""), "Espessura fundo", carta.get("esp_fundo", "")],
     ]
-    t_mat = Table(dados_materiais, colWidths=[W*.18, W*.32, W*.18, W*.32])
-    t_mat.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
-    story.append(t_mat)
-    story.append(Spacer(1, 3*mm))
+    story.append(build_table(dados_materiais, [W * .18, W * .32, W * .18, W * .32]))
 
-    story.append(Paragraph("<b>Dados do lote</b>", S("sec_lote", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    story.append(Paragraph("2. Dados do lote", section_style))
     dados_lote = [
         ["Linha", carta.get("linha", ""), "Embalagem", carta.get("embalagem", "")],
         ["Ordem de produção", carta.get("op", ""), "Quantidade", carta.get("lote_qtd", "")],
         ["Data", carta.get("data", ""), "Observações", carta.get("obs", "")],
     ]
-    t_lote = Table(dados_lote, colWidths=[W*.18, W*.32, W*.18, W*.32])
-    t_lote.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
-    story.append(t_lote)
-    story.append(Spacer(1, 3*mm))
+    story.append(build_table(dados_lote, [W * .18, W * .32, W * .18, W * .32]))
 
-    story.append(Paragraph("<b>Responsável pela inspeção</b>", S("sec_resp", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    story.append(Paragraph("3. Responsável pela inspeção", section_style))
     dados_resp = [["Nome", carta.get("responsavel_nome", ""), "Chapa", carta.get("responsavel_chapa", "")]]
-    t_resp = Table(dados_resp, colWidths=[W*.18, W*.32, W*.18, W*.32])
-    t_resp.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
-    story.append(t_resp)
-    story.append(Spacer(1, 4*mm))
-    rows = [["Característica", "Amostras", "Med./am.", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPS", "CPI", "Cpk", "Status"]]
+    story.append(build_table(dados_resp, [W * .18, W * .32, W * .18, W * .32]))
+
+    story.append(Paragraph("4. Resultado estatístico por característica", section_style))
+    rows = [["Característica", "Amostras", "Med./am.", "N", "Média", "Desvio padrão", "LIE", "LSE", "Cp", "CPS", "CPI", "Cpk", "Status"]]
     for r in results:
-        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r.get("medicoes_por_amostra", ""), r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r.get("cps"), r.get("cpi"), r["cpk"], r["status"]])
-    tb = Table(rows, colWidths=[W*.19, W*.065, W*.055, W*.035, W*.065, W*.065, W*.055, W*.055, W*.045, W*.045, W*.045, W*.05, W*.08], repeatRows=1)
-    tb.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 6.2), ("BACKGROUND", (0,0),(-1,0), colors.lightgrey)]))
-    story.append(tb)
-    story.append(Spacer(1, 5*mm))
-    story.append(Paragraph("<b>Gráficos das coletas</b>", S("sec1", fontSize=10, textColor=TEXT, fontName="Helvetica-Bold")))
+        rows.append([
+            r.get("descricao", ""),
+            f"{r.get('amostras_completas','')}/{r.get('amostras_previstas','')}",
+            r.get("medicoes_por_amostra", ""),
+            r.get("n", ""),
+            fmt_br(r.get("media")),
+            fmt_br(r.get("desvio")),
+            fmt_br(r.get("lie")),
+            fmt_br(r.get("lse")),
+            fmt_br(r.get("cp")),
+            fmt_br(r.get("cps")),
+            fmt_br(r.get("cpi")),
+            fmt_br(r.get("cpk")),
+            r.get("status", ""),
+        ])
+    result_widths = [W*.22, W*.07, W*.06, W*.04, W*.07, W*.08, W*.06, W*.06, W*.05, W*.055, W*.055, W*.055, W*.075]
+    story.append(build_table(rows, result_widths, header=True, header_rows=1))
+
+    story.append(Paragraph("5. Gráficos das coletas", section_style))
+    chart_w = W
     for r in results:
-        d = pdf_chart_drawing(r, W)
+        d = pdf_chart_drawing(r, chart_w)
         if d:
             story.append(d)
-            story.append(Spacer(1, 3*mm))
-    story.append(Paragraph("<b>Análise e parecer automático</b>", S("sec2", fontSize=10, textColor=TEXT, fontName="Helvetica-Bold")))
+            story.append(Spacer(1, 3 * mm))
+
+    story.append(Paragraph("6. Análise e parecer automático", section_style))
     for ins in build_insights(results):
-        story.append(Paragraph(ins["text"], S("body", fontSize=8, leading=11, textColor=TEXT)))
-        story.append(Spacer(1, 1.2*mm))
-    story.append(Spacer(1, 8*mm))
-    story.append(Paragraph(f"Responsável pela inspeção: {carta.get('responsavel_nome','')} | Chapa: {carta.get('responsavel_chapa','')}", S("resp", fontSize=8, textColor=TEXT)))
-    story.append(Paragraph("Assinatura: _______________________________", S("sig", fontSize=8, textColor=TEXT)))
+        level = ins.get("level", "wn")
+        bg = GREEN if level == "ok" else RED if level == "fl" else YELLOW
+        parecer = [[ins.get("text", "")]]
+        t = build_table(parecer, [W])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), bg),
+            ("GRID", (0, 0), (-1, -1), 0.45, GRID),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 2 * mm))
+
+    story.append(Spacer(1, 6 * mm))
+    story.append(Paragraph(f"Responsável pela inspeção: {carta.get('responsavel_nome','')} | Chapa: {carta.get('responsavel_chapa','')}", normal_style))
+    story.append(Paragraph("Assinatura: _______________________________", normal_style))
+
     doc.build(story)
     buf.seek(0)
     return buf.getvalue()
