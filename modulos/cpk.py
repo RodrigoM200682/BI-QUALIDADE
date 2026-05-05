@@ -134,6 +134,10 @@ st.markdown(
     .ok {border-left:5px solid #00e5a0; padding:10px; background:#11181a; border-radius:10px; margin-bottom:8px;}
     .wn {border-left:5px solid #ffb340; padding:10px; background:#1d1810; border-radius:10px; margin-bottom:8px;}
     .fl {border-left:5px solid #ff4d4d; padding:10px; background:#1d1111; border-radius:10px; margin-bottom:8px;}
+    .analysis-ok {border:1px solid #00a86b; background:linear-gradient(90deg,#0b5f45,#0f2f27); color:#ffffff; border-radius:14px; padding:14px 16px; margin:10px 0; font-weight:600;}
+    .analysis-wn {border:1px solid #ffb340; background:linear-gradient(90deg,#7a5200,#2f250f); color:#ffffff; border-radius:14px; padding:14px 16px; margin:10px 0; font-weight:600;}
+    .analysis-fl {border:1px solid #ff4d4d; background:linear-gradient(90deg,#7a1717,#2f1111); color:#ffffff; border-radius:14px; padding:14px 16px; margin:10px 0; font-weight:600;}
+    .rule-card {background:#1c1c25; border:1px solid #2a2a32; border-radius:16px; padding:16px; margin-bottom:12px;}
     .muted {color:#9a9aad; font-size:0.9rem;}
     .orange-help {border-left:5px solid #ff8c00; padding:10px; background:#20160a; border-radius:10px; margin-bottom:8px;}
     div.stButton > button[kind="primary"] {background:#00a86b !important; border-color:#00a86b !important; color:white !important;}
@@ -633,6 +637,11 @@ init_state()
 # Cálculo estatístico
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_float(value):
+    """Converte valor no padrão brasileiro ou internacional para float com 2 casas.
+
+    Aceita: 10,25 | 10.25 | 10 | -10,25.
+    Rejeita texto, múltiplos separadores e formatos inválidos.
+    """
     if value is None or value == "":
         return None
     try:
@@ -640,10 +649,39 @@ def parse_float(value):
             return None
     except Exception:
         pass
+    txt = str(value).strip()
+    if txt == "":
+        return None
+    # aceita somente números com vírgula OU ponto como separador decimal.
+    if not re.fullmatch(r"-?\d+(?:[,.]\d{1,2})?", txt):
+        return None
     try:
-        return float(str(value).replace(",", "."))
+        return round(float(txt.replace(",", ".")), 2)
     except Exception:
         return None
+
+
+def is_valid_decimal_br(value):
+    """Valida preenchimento numérico com até 2 casas decimais. Campo vazio é permitido."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    txt = str(value).strip()
+    if txt == "":
+        return True
+    return re.fullmatch(r"-?\d+(?:[,.]\d{1,2})?", txt) is not None
+
+
+def format_decimal_br(value):
+    """Formata número com duas casas e vírgula para exibição na coleta."""
+    v = parse_float(value)
+    if v is None:
+        return ""
+    return f"{v:.2f}".replace(".", ",")
 
 
 def calc_stats(samples, lse=None, lie=None):
@@ -789,6 +827,108 @@ def interpretar_lado_critico(result):
         return "O lado crítico é o limite inferior, pois CPI é menor que CPS."
     return "O processo está aproximadamente centralizado entre os limites, pois CPS e CPI são iguais ou muito próximos."
 
+
+
+
+def cpk_status_detalhado(cpk):
+    """Classifica o CPK para análise visual automática."""
+    if cpk is None:
+        return "Sem cálculo", "analysis-wn"
+    if cpk >= 2.00:
+        return "Processo excelente", "analysis-ok"
+    if cpk >= 1.67:
+        return "Processo robusto", "analysis-ok"
+    if cpk >= 1.33:
+        return "Processo bom / capaz", "analysis-ok"
+    if cpk >= 1.00:
+        return "Processo próximo dos limites", "analysis-wn"
+    return "Processo crítico", "analysis-fl"
+
+
+def render_analysis_box(text: str, level: str = "wn"):
+    css = {"ok": "analysis-ok", "wn": "analysis-wn", "fl": "analysis-fl"}.get(level, "analysis-wn")
+    st.markdown(f"<div class='{css}'>{text}</div>", unsafe_allow_html=True)
+
+
+def excluir_modelo(nome_modelo: str):
+    modelos = st.session_state.get("modelos", {}) or {}
+    if nome_modelo in modelos:
+        modelos.pop(nome_modelo, None)
+        st.session_state.modelos = modelos
+        save_modelos(modelos)
+        save_current_cpk_state()
+        return True
+    return False
+
+
+def excluir_carta_por_id(carta_id: str):
+    chars = st.session_state.get("caracteristicas", []) or []
+    novas = [c for c in chars if str(c.get("id")) != str(carta_id)]
+    if len(novas) != len(chars):
+        st.session_state.caracteristicas = novas
+        st.session_state.selected_id = novas[0].get("id") if novas else None
+        if not novas:
+            st.session_state.carta_ok = False
+        save_current_cpk_state()
+        return True
+    return False
+
+
+def limpar_carta_ativa():
+    st.session_state.carta_ok = False
+    st.session_state.carta_dados = {}
+    st.session_state.caracteristicas = []
+    st.session_state.selected_id = None
+    save_current_cpk_state()
+
+
+def render_regras_cpk():
+    st.subheader("Regra de cálculo e parâmetros estatísticos do CPK")
+    st.markdown(
+        "<div class='rule-card'>"
+        "<b>Objetivo da análise:</b> avaliar se a característica medida possui capacidade real para produzir dentro dos limites de especificação definidos. "
+        "No módulo CPK, os limites utilizados são <b>LIE</b> e <b>LSE</b>. Não são utilizados LIC e LSC, pois estes pertencem a carta de controle estatístico e não ao cálculo de capacidade por especificação."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("#### Fórmulas utilizadas")
+    st.latex(r"\bar{x}=\frac{\sum x_i}{n}")
+    st.latex(r"\sigma=\sqrt{\frac{\sum (x_i-\bar{x})^2}{n-1}}")
+    st.latex(r"Cp=\frac{LSE-LIE}{6\sigma}")
+    st.latex(r"CPS=\frac{LSE-\bar{x}}{3\sigma}")
+    st.latex(r"CPI=\frac{\bar{x}-LIE}{3\sigma}")
+    st.latex(r"CPK=\min(CPS, CPI)")
+
+    st.markdown("#### Parâmetros utilizados pelo aplicativo")
+    parametros = pd.DataFrame([
+        {"Parâmetro": "LIE", "Nome técnico": "Limite Inferior de Especificação", "Origem": "Especificação técnica, norma, desenho ou requisito interno/cliente", "Uso na análise": "Define o menor valor permitido para a característica."},
+        {"Parâmetro": "LSE", "Nome técnico": "Limite Superior de Especificação", "Origem": "Especificação técnica, norma, desenho ou requisito interno/cliente", "Uso na análise": "Define o maior valor permitido para a característica."},
+        {"Parâmetro": "Média x̄", "Nome técnico": "Média do processo", "Origem": "Valores medidos", "Uso na análise": "Indica onde o processo está centralizado em relação aos limites."},
+        {"Parâmetro": "Desvio padrão σ", "Nome técnico": "Dispersão amostral", "Origem": "Valores medidos", "Uso na análise": "Indica a variação natural encontrada na coleta."},
+        {"Parâmetro": "Cp", "Nome técnico": "Capacidade potencial", "Origem": "LIE, LSE e desvio padrão", "Uso na análise": "Mostra a capacidade considerando apenas a largura da especificação e a variação."},
+        {"Parâmetro": "CPS", "Nome técnico": "Capacidade superior", "Origem": "LSE, média e desvio padrão", "Uso na análise": "Mostra a distância da média até o limite superior."},
+        {"Parâmetro": "CPI", "Nome técnico": "Capacidade inferior", "Origem": "LIE, média e desvio padrão", "Uso na análise": "Mostra a distância da média até o limite inferior."},
+        {"Parâmetro": "CPK", "Nome técnico": "Capacidade real do processo", "Origem": "Menor valor entre CPS e CPI", "Uso na análise": "Determina o lado mais crítico e a capacidade real do processo."},
+    ])
+    st.dataframe(parametros, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Regra automática de interpretação")
+    regras = pd.DataFrame([
+        {"Faixa de CPK": "CPK < 1,00", "Análise gerada": "Processo crítico", "Cor": "Vermelho", "Diretriz": "Conter ou bloquear o processo, avaliar causa e corrigir antes de liberar."},
+        {"Faixa de CPK": "1,00 ≤ CPK < 1,33", "Análise gerada": "Processo próximo dos limites", "Cor": "Amarelo", "Diretriz": "Monitorar com frequência, reduzir variação e centralizar o processo."},
+        {"Faixa de CPK": "1,33 ≤ CPK < 1,67", "Análise gerada": "Processo bom / capaz", "Cor": "Verde", "Diretriz": "Manter controle, registrar evidências e acompanhar estabilidade."},
+        {"Faixa de CPK": "1,67 ≤ CPK < 2,00", "Análise gerada": "Processo robusto", "Cor": "Verde", "Diretriz": "Condição indicada para características críticas ou de maior confiabilidade."},
+        {"Faixa de CPK": "CPK ≥ 2,00", "Análise gerada": "Processo excelente", "Cor": "Verde", "Diretriz": "Baixo risco de geração de peças fora da especificação, se o processo estiver estável."},
+    ])
+    st.dataframe(regras, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Observações de uso")
+    st.markdown(
+        "- O CPK deve ser calculado com dados reais de produção e método de medição padronizado.\n"
+        "- O processo deve estar estável; caso contrário, o CPK pode indicar uma falsa condição de capacidade.\n"
+        "- Quando CPS < CPI, o lado crítico é o limite superior. Quando CPI < CPS, o lado crítico é o limite inferior.\n"
+        "- Pontos fora de LIE/LSE aparecem como condição crítica para investigação, mesmo quando o CPK médio parecer aceitável."
+    )
 
 def characteristic_has_measurements(char):
     return len(flatten_measurements(char)) > 0
@@ -985,7 +1125,7 @@ def make_pdf(carta, results):
 st.title("📊 Carta de Inspeção CPK")
 st.caption("Fluxo: carta de dados → modelo salvo/carregado → características sem duplicidade → medições por amostra → cálculo CPK por LIE/LSE → backup/restauração.")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística", "5. Backup / restauração"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística", "5. Backup / restauração", "6. Regra de cálculo CPK"])
 
 
 with tab1:
@@ -1179,9 +1319,20 @@ with tab3:
         for col in expected_cols:
             if col not in df_med.columns:
                 df_med[col] = None
-        df_med = df_med[expected_cols]
+        df_med = df_med[expected_cols].copy()
+        # Coleta padronizada: entrada por texto para permitir vírgula brasileira.
+        # O salvamento valida o conteúdo e bloqueia qualquer entrada não numérica.
+        for k in keys_medicao:
+            df_med[k] = df_med[k].apply(format_decimal_br)
         column_config = {"Amostra": st.column_config.NumberColumn("Amostra", disabled=True)}
-        column_config.update({k: st.column_config.NumberColumn(k, format="%.4f") for k in keys_medicao})
+        column_config.update({
+            k: st.column_config.TextColumn(
+                k,
+                help="Digite número com até 2 casas decimais. Ex.: 10,25",
+                max_chars=12,
+            )
+            for k in keys_medicao
+        })
         edited_med = st.data_editor(
             df_med,
             use_container_width=True,
@@ -1191,18 +1342,35 @@ with tab3:
             key=f"editor_{char['id']}",
         )
         if st.button("Salvar medições desta característica", use_container_width=True, type="primary"):
-            registros = edited_med.to_dict("records")
+            registros_brutos = edited_med.to_dict("records")
             incompletas = []
-            for row in registros:
-                vals = [parse_float(row.get(k)) for k in keys_medicao]
+            invalidas = []
+            registros = []
+            for row in registros_brutos:
+                amostra = int(row.get("Amostra", 0) or 0)
+                nova_linha = {"Amostra": amostra}
+                vals = []
+                for k in keys_medicao:
+                    bruto = row.get(k)
+                    if not is_valid_decimal_br(bruto):
+                        invalidas.append(f"Amostra {amostra} / {k}: {bruto}")
+                    v = parse_float(bruto)
+                    vals.append(v)
+                    nova_linha[k] = v
                 if any(v is not None for v in vals) and not all(v is not None for v in vals):
-                    incompletas.append(int(row.get("Amostra", 0)))
-            if incompletas:
+                    incompletas.append(amostra)
+                registros.append(nova_linha)
+            if invalidas:
+                st.error(
+                    "Entrada inválida bloqueada. Use somente números com vírgula ou ponto e no máximo 2 casas decimais. "
+                    "Exemplo correto: 10,25. Campos inválidos: " + "; ".join(invalidas[:10])
+                )
+            elif incompletas:
                 st.error(f"As amostras {incompletas} estão parcialmente preenchidas. Cada amostra registrada deve ter {len(keys_medicao)} medição(ões).")
             else:
                 char["medicoes"] = registros
                 save_current_cpk_state()
-                st.success("Medições salvas. A análise estatística já pode ser consultada na aba 4.")
+                st.success("Medições salvas com 2 casas decimais. A análise estatística já pode ser consultada na aba 4.")
 
 with tab4:
     st.subheader("Análise estatística e cálculo do CPK")
@@ -1253,8 +1421,15 @@ with tab4:
                 st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### Análise e parecer automático")
+        for r in results:
+            status_txt, status_css = cpk_status_detalhado(r.get("cpk"))
+            cpk_txt = "—" if r.get("cpk") is None else f"{r['cpk']:.2f}"
+            render_analysis_box(
+                f"<b>{r['descricao']}</b> — {status_txt}. CPK: {cpk_txt}. {interpretar_lado_critico(r)}",
+                "ok" if status_css == "analysis-ok" else "wn" if status_css == "analysis-wn" else "fl"
+            )
         for ins in build_insights(results):
-            st.markdown(f"<div class='{ins['level']}'>{ins['text']}</div>", unsafe_allow_html=True)
+            render_analysis_box(ins["text"], ins["level"])
 
         st.markdown("#### Exportação")
         col_a, col_b = st.columns(2)
@@ -1322,3 +1497,67 @@ with tab5:
                 st.error(f"Não foi possível restaurar o backup CPK: {exc}")
         else:
             st.success("Este backup já foi aplicado nesta sessão. A base CPK está atualizada.")
+
+    st.markdown("#### Excluir registros salvos")
+    st.warning(
+        "Use esta opção somente quando for necessário remover uma carta ativa ou um modelo salvo. "
+        "A exclusão atualiza a base persistente do CPK imediatamente. Recomendo baixar o backup Excel antes de excluir."
+    )
+    tipo_exclusao = st.radio(
+        "O que deseja excluir?",
+        ["Carta/característica ativa", "Modelo salvo", "Carta ativa completa"],
+        horizontal=True,
+        key="tipo_exclusao_cpk",
+    )
+
+    if tipo_exclusao == "Modelo salvo":
+        modelos = st.session_state.get("modelos", {}) or {}
+        nomes = sorted(modelos.keys())
+        if not nomes:
+            st.info("Não há modelos salvos para excluir.")
+        else:
+            modelo_excluir = st.selectbox("Selecione o modelo salvo que deseja excluir", nomes, key="modelo_excluir_cpk")
+            confirmar_modelo = st.checkbox("Confirmo a exclusão definitiva deste modelo", key="confirmar_excluir_modelo_cpk")
+            if st.button("Excluir modelo selecionado", disabled=not confirmar_modelo, key="btn_excluir_modelo_cpk"):
+                if excluir_modelo(modelo_excluir):
+                    st.success(f"Modelo excluído: {modelo_excluir}")
+                    st.rerun()
+                else:
+                    st.error("Modelo não localizado para exclusão.")
+
+    elif tipo_exclusao == "Carta ativa completa":
+        if not st.session_state.get("carta_dados") and not st.session_state.get("caracteristicas"):
+            st.info("Não há carta ativa para excluir.")
+        else:
+            resumo_carta = st.session_state.get("carta_dados", {}) or {}
+            st.markdown(
+                f"<div class='card'><b>Carta ativa:</b> Linha {resumo_carta.get('linha','')} | "
+                f"Embalagem {resumo_carta.get('embalagem','')} | OP {resumo_carta.get('op','')} | "
+                f"Características abertas: {len(st.session_state.get('caracteristicas', []) or [])}</div>",
+                unsafe_allow_html=True,
+            )
+            confirmar_carta = st.checkbox("Confirmo a exclusão da carta ativa completa", key="confirmar_excluir_carta_completa_cpk")
+            if st.button("Excluir carta ativa completa", disabled=not confirmar_carta, key="btn_excluir_carta_completa_cpk"):
+                limpar_carta_ativa()
+                st.success("Carta ativa excluída.")
+                st.rerun()
+
+    else:
+        chars = st.session_state.get("caracteristicas", []) or []
+        if not chars:
+            st.info("Não há cartas/características ativas para excluir.")
+        else:
+            opcoes_cartas = {f"{c.get('descricao','Sem descrição')} | ID {c.get('id')} | LIE {c.get('lie')} | LSE {c.get('lse')}": c.get("id") for c in chars}
+            carta_label = st.selectbox("Selecione a carta/característica que deseja excluir", list(opcoes_cartas.keys()), key="carta_excluir_cpk")
+            confirmar_carta_item = st.checkbox("Confirmo a exclusão definitiva desta carta/característica", key="confirmar_excluir_carta_item_cpk")
+            if st.button("Excluir carta/característica selecionada", disabled=not confirmar_carta_item, key="btn_excluir_carta_item_cpk"):
+                if excluir_carta_por_id(opcoes_cartas[carta_label]):
+                    st.success("Carta/característica excluída.")
+                    st.rerun()
+                else:
+                    st.error("Carta/característica não localizada para exclusão.")
+
+
+with tab6:
+    render_regras_cpk()
+
